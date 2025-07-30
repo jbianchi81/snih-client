@@ -1,9 +1,10 @@
 import json
 import requests
 import pandas
-from typing import TypedDict, Union, Literal, List
+from typing import TypedDict, Union, Literal, List, _TypedDictMeta
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
+import re
 
 base_url = "https://snih.hidricosargentina.gob.ar/"
 
@@ -27,8 +28,8 @@ class EstacionSNIH(TypedDict):
     MesHidrologico: int
     NivelPsicrometrico: float
     Ventilador: bool
-    Alta: str
-    Baja: str
+    Alta: datetime
+    Baja: datetime
     CeroEscala: float
     SistemaCota: int
     AfluenteDe: Union[str, None]
@@ -40,9 +41,9 @@ class EstacionSNIH(TypedDict):
     Transmision: str
     ModoDeLlegar: str
     Actual: str
-    RegistroValidoHasta: str
+    RegistroValidoHasta: datetime
     Autor: int
-    Registro: str    
+    Registro: datetime
 
 class CodigoMedicion(TypedDict):
     __type: str
@@ -58,28 +59,28 @@ class CodigoMedicion(TypedDict):
     DerechoMinimoRegistro: int
     AgrupacionesPosibles: int
     Actual: str
-    RegistroValidoHasta: str
+    RegistroValidoHasta: datetime
     Autor: str
-    Registro: str
+    Registro: datetime
 
 class Asociacion(TypedDict):
     __type: str
     Estacion: int
     Codigo: int
-    Desde: str
-    Hasta: str
+    Desde: datetime
+    Hasta: datetime
     Minimo: int
     Maximo: int
     TipoValidacion: int
     Actual: str
-    RegistroValidoHasta: str
+    RegistroValidoHasta: datetime
     Autor: int
-    Registro: str
+    Registro: datetime
 
 class Medicion(TypedDict):
     ExtensionData: dict
     Codigo: int
-    FechaHora: str
+    FechaHora: datetime
     NombreCodigo: str
     Valor: float
 
@@ -90,17 +91,17 @@ class RegistroMedicion(TypedDict):
 
 class Registro(TypedDict):
     ExtensionData: dict
-    FechaHora: str
+    FechaHora: datetime
     Mediciones: List[RegistroMedicion]
 
 class RegistroFlat(TypedDict):
     ExtensionData: dict
-    FechaHora: str
+    FechaHora: datetime
     Codigo: int
     Valor: int
 
 class RegistroHistorico(TypedDict):
-    FechaHora: str
+    FechaHora: datetime
     Medicion: float
     Calificador: str
     Validado: bool
@@ -116,7 +117,7 @@ def requestPostWithHeaders(url : str, body : Union[dict, None] = None) -> reques
         }
     )
 
-def parseResponseList(response : requests.Response, list_property : Union[str, List[str]] = "d", caller : str = "") -> list:
+def parseResponseList(response : requests.Response, list_property : Union[str, List[str]] = "d", caller : str = "", schema : _TypedDictMeta = None) -> list:
     if response.status_code != 200:
         raise requests.exceptions.HTTPError("Function %s failed. Status code: %i, message: %s" % (caller, response.status_code, response.text))
     try:
@@ -131,25 +132,42 @@ def parseResponseList(response : requests.Response, list_property : Union[str, L
             data = data[k]
         if type(data) is not list:
             raise ValueError("Bad type in property '%s' from %s response. Must be a list" % (",".join(list_property), caller))    
-        return data
-    if list_property not in content:
-        raise ValueError("Missing property '%s' from %s response" % (list_property, caller))
-    if type(content[list_property]) is not list:
-        raise ValueError("Bad type in property '%s' from %s response. Must be a list" % (list_property, caller))
-    return content[list_property]
+    else:
+        if list_property not in content:
+            raise ValueError("Missing property '%s' from %s response" % (list_property, caller))
+        if type(content[list_property]) is not list:
+            raise ValueError("Bad type in property '%s' from %s response. Must be a list" % (list_property, caller))
+        data = content[list_property]
+    data = parseColumns(data, schema) if schema is not None else data
+    return data
 
-def exportResponse(data : List[dict], output : str = None, output_format : Literal["json","csv"] = "csv") -> List:
+def parseColumns(data : List[dict], schema : _TypedDictMeta) -> List[dict]:
+    for item in data:
+        for key, typ in schema.__annotations__.items():
+            if key in item and item[key] is not None and item[key] != "":
+                if typ == datetime:
+                    item[key] = dateFromEpochInStr(item[key])
+    return data
+
+def toJSONSerializable(data : List[dict], schema: _TypedDictMeta) -> List[dict]:
+    for item in data:
+        for key, typ in schema.__annotations__.items():
+            if key in item and item[key] is not None:
+                if typ == datetime and type(item[key]) == datetime:
+                    item[key] = item[key].isoformat()
+    return data
+
+def exportResponse(data : List[dict], output : str = None, output_format : Literal["json","csv"] = "csv", schema : _TypedDictMeta = None) -> List:
     df = pandas.DataFrame(data)
     if output is not None:
         output_dest = open(output, "w", encoding="utf-8")
         if output_format.lower() == "json":
+            data = toJSONSerializable(data,schema) if schema is not None else data
             json.dump(data, output_dest, indent=2)
         elif output_format.lower() == "csv":
             df.to_csv(output_dest, index=False)
         else:
             raise ValueError("Invalid format. Valid values: 'csv', 'json'")
-
-
 
 def flattenRecord(record : Registro) -> List[RegistroFlat]:
     return [
@@ -161,20 +179,28 @@ def flattenRecord(record : Registro) -> List[RegistroFlat]:
         } for m in record["Mediciones"]
     ]
 
-def retrieveParseSave(api_method : str, output : str = None, output_format : Literal["json","csv"] = "csv", data_property : str = "d", params : dict = None) -> List[dict]:
+def dateFromEpochInStr(datestr : str) -> datetime:
+    # "/Date(1703185987000)/"
+    match = re.search(r"\d+", datestr)
+    if not match:
+        raise ValueError("Invalid date string")
+    epoch = int(match.group())
+    return datetime.fromtimestamp(epoch / 1000, tz=timezone.utc)
+
+def retrieveParseSave(api_method : str, output : str = None, output_format : Literal["json","csv"] = "csv", data_property : str = "d", params : dict = None, schema : _TypedDictMeta = None) -> List[dict]:
     response = requestPostWithHeaders("%s%s" % (base_url, api_method), params)
-    data = parseResponseList(response, data_property, api_method)
-    exportResponse(data, output, output_format)
+    data = parseResponseList(response, data_property, api_method, schema = schema)
+    exportResponse(data, output, output_format, schema = schema)
     return data
 
 def leerEstaciones(output : str = None, output_format : Literal["json","csv"] = "csv") -> List[EstacionSNIH]:
-    return retrieveParseSave("Filtros.aspx/LeerEstaciones", output, output_format)
+    return retrieveParseSave("Filtros.aspx/LeerEstaciones", output, output_format, schema = EstacionSNIH)
 
 def leerCodigosMedicion(output : str = None, output_format : Literal["json","csv"] = "csv") -> List[CodigoMedicion]:
-    return retrieveParseSave("MuestraDatos.aspx/LeerCodigosMedicion", output, output_format)
+    return retrieveParseSave("MuestraDatos.aspx/LeerCodigosMedicion", output, output_format, schema = CodigoMedicion)
 
 def leerListaAsociaciones(output : str = None, output_format : Literal["json","csv"] = "csv") -> List[Asociacion]:
-    return retrieveParseSave("MuestraDatos.aspx/LeerListaAsociaciones", output, output_format)
+    return retrieveParseSave("MuestraDatos.aspx/LeerListaAsociaciones", output, output_format, schema = Asociacion)
 
 def leerDatosActuales(estacion : int, output : str = None, output_format : Literal["json","csv"] = "csv") -> List[Medicion]:
     return retrieveParseSave(
@@ -182,7 +208,8 @@ def leerDatosActuales(estacion : int, output : str = None, output_format : Liter
         output, 
         output_format,
         data_property=["d","Mediciones"], 
-        params={"estacion": str(estacion)})
+        params={"estacion": str(estacion)},
+        schema = Medicion)
 
 def leerUltimosRegistros(
         site : int, 
@@ -204,7 +231,8 @@ def leerUltimosRegistros(
     data_flat = [] 
     for r in data:
         data_flat.extend(flattenRecord(r))
-    exportResponse(data_flat, output, output_format)
+    data_flat = parseColumns(data_flat, schema = RegistroFlat)
+    exportResponse(data_flat, output, output_format, schema = RegistroFlat)
     return data
 
 def leerDatosHistoricos(
@@ -227,7 +255,8 @@ def leerDatosHistoricos(
             "fechaDesde": begin_date.strftime("%Y-%m-%d"),
             "fechaHasta": end_date.strftime("%Y-%m-%d"),
             "validados": validated
-        })
+        },
+        schema=RegistroHistorico)
 
 def parse_datetime(s):
     for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
@@ -259,22 +288,22 @@ def parse_args():
     parser.add_argument(
         "-s", "--site",
         type=int,
-        help="site ID (required for present-values, last-records)"
+        help="site ID (required for present-values, last-records, historical)"
     )
     parser.add_argument(
         "-v", "--variable",
         type=int,
-        help="variable ID (required for last-records)"
+        help="variable ID (required for last-records, historical)"
     )
     parser.add_argument(
         "-b", "--begin_date",
         type=parse_datetime,
-        help="begin date (required for last-records)"
+        help="begin date (required for last-records, historical)"
     )
     parser.add_argument(
         "-e", "--end_date",
         type=parse_datetime,
-        help="end date (required for last-records)"
+        help="end date (required for last-records, historical)"
     )
     return parser.parse_args()
 

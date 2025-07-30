@@ -5,14 +5,16 @@ pip install -r requirements.txt
 ```
 ## Run from command line :
 ```text
-$ python snih-client.py --help
-usage: snih-client.py [-h] [-f {csv,json}] [-s SITE] [-v VARIABLE] [-b BEGIN_DATE] [-e END_DATE]
-                      {sites,variables,observations,present-values,last-records} output_path
+$  python snih-client.py --help
+usage: snih-client.py [-h] [-f {csv,json}] [-s SITE] [-v VARIABLE] [-b BEGIN_DATE]
+                      [-e END_DATE]
+                      {sites,variables,observations,present-values,last-records,historical}
+                      output_path
 
 Download and save SNIH metadata/data
 
 positional arguments:
-  {sites,variables,observations,present-values,last-records}
+  {sites,variables,observations,present-values,last-records,historical}
                         Metadata/data list to retrieve
   output_path           Path to the output file (e.g., /path/to/file.csv)
 
@@ -20,13 +22,13 @@ options:
   -h, --help            show this help message and exit
   -f {csv,json}, --format {csv,json}
                         Output format: 'csv' (default) or 'json'
-  -s SITE, --site SITE  site ID (required for present-values, last-records)
+  -s SITE, --site SITE  site ID (required for present-values, last-records, historical)
   -v VARIABLE, --variable VARIABLE
-                        variable ID (required for last-records)
+                        variable ID (required for last-records, historical)
   -b BEGIN_DATE, --begin_date BEGIN_DATE
-                        begin date (required for last-records)
+                        begin date (required for last-records, historical)
   -e END_DATE, --end_date END_DATE
-                        end date (required for last-records)
+                        end date (required for last-records, historical)
 ```
 ### Examples
 ```bash
