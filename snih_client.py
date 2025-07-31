@@ -144,9 +144,18 @@ def parseResponseList(response : requests.Response, list_property : Union[str, L
 def parseColumns(data : List[dict], schema : _TypedDictMeta) -> List[dict]:
     for item in data:
         for key, typ in schema.__annotations__.items():
-            if key in item and item[key] is not None and item[key] != "":
-                if typ == datetime:
+            if key in item and item[key] is not None:
+                if  item[key] == "":
+                    item[key] = None
+                elif typ in [int, float]:
+                    if item[key] == -999:
+                        item[key] = None
+                elif typ == str:
+                    if item[key] in ["--", "-", "S/D", "-999"]:
+                        item[key] = None
+                elif typ == datetime:
                     item[key] = dateFromEpochInStr(item[key])
+
     return data
 
 def toJSONSerializable(data : List[dict], schema: _TypedDictMeta) -> List[dict]:
@@ -163,9 +172,9 @@ def exportResponse(data : List[dict], output : str = None, output_format : Liter
         output_dest = open(output, "w", encoding="utf-8")
         if output_format.lower() == "json":
             data = toJSONSerializable(data,schema) if schema is not None else data
-            json.dump(data, output_dest, indent=2)
+            json.dump(data, output_dest, indent=2, ensure_ascii=False)
         elif output_format.lower() == "csv":
-            df.to_csv(output_dest, index=False)
+            df.to_csv(output_dest, index=False, encoding="utf-8")
         else:
             raise ValueError("Invalid format. Valid values: 'csv', 'json'")
 
@@ -233,7 +242,7 @@ def leerUltimosRegistros(
         data_flat.extend(flattenRecord(r))
     data_flat = parseColumns(data_flat, schema = RegistroFlat)
     exportResponse(data_flat, output, output_format, schema = RegistroFlat)
-    return data
+    return data_flat
 
 def leerDatosHistoricos(
         site : int, 
