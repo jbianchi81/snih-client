@@ -1,2 +1,5 @@
 pandas
 requests
+xsdata
+xsdata[cli]
+matplotlib

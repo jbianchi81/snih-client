@@ -1,10 +1,11 @@
 import json
 import requests
 import pandas
-from typing import TypedDict, Union, Literal, List, _TypedDictMeta
+from typing import TypedDict, Union, Literal, List, _TypedDictMeta, Tuple
 import argparse
 from datetime import datetime, timezone
 import re
+import logging
 
 base_url = "https://snih.hidricosargentina.gob.ar/"
 
@@ -84,6 +85,9 @@ class Medicion(TypedDict):
     NombreCodigo: str
     Valor: float
 
+class AsociacionMedicion(Asociacion, CodigoMedicion):
+    pass
+
 class RegistroMedicion(TypedDict):
     ExtensionData: dict
     Codigo: int
@@ -105,6 +109,41 @@ class RegistroHistorico(TypedDict):
     Medicion: float
     Calificador: str
     Validado: bool
+
+#### WMDR classes ####
+
+
+class gmlPoint(TypedDict):
+    pos : str # Coordinates in CRS order (usually lon lat)
+    _srsName : Union[None, str] # Reference to spatial reference system (e.g. EPSG:4326 for WGS 84)
+
+class WMDRGeospatialLocation(TypedDict):
+    geoLocation : gmlPoint
+    geopositioningMethod : Union[None,str]
+    coordinateReferenceSystem : Union[None,str]
+
+class WMDRObservingFacility(TypedDict):
+    responsibleParty : str
+    geospatialLocation : List[WMDRGeospatialLocation] # **3-07 Geospatial location (M)** | EstacionSNIH->Longitud, EstacionSNIH->Latitud EstacionSNIH->Cota |
+    description : Union[None,str]
+    identifier : Union[None,str]
+    _id : str
+    name : Union[None,str]
+    facilityType : str
+    belongsToSet : Union[None,str] # # 3-10 Station/platform cluster (O) | aplica? | SNIH - AR
+    dateEstablished : Union[None, datetime]
+    # observations : List[WMDRObservation]
+    timeZone : str
+    dateClosed : Union[None, datetime]
+    wmoRegion : str # 3-01 Region of origin of data (C) | southAmerica 	South America | https://codes.wmo.int/wmdr/_WMORegion
+    territory : str # 3-02 Territory of origin of data (C) | ARG 	Argentina | https://codes.wmo.int/wmdr/_TerritoryName
+    programAffiliation : Union[None,str]
+    climateZone : Union[None,str]
+
+class WIGOSMetadataRecord(TypedDict):
+    facility : List[WMDRObservingFacility]
+    facilitySet : List[str]
+    # observation : List[ObservationCollection]
 
 def requestPostWithHeaders(url : str, body : Union[dict, None] = None) -> requests.Response:
     return requests.post(
@@ -266,6 +305,89 @@ def leerDatosHistoricos(
             "validados": validated
         },
         schema=RegistroHistorico)
+
+def harvestMetadata() -> Tuple[List[EstacionSNIH],List[CodigoMedicion],List[Asociacion]]:
+    estaciones = leerEstaciones()
+    codigos_medicion = leerCodigosMedicion()
+    asociaciones = leerListaAsociaciones()
+    return estaciones, codigos_medicion, asociaciones
+
+### WMDR functions ###
+
+def getClimateZone(lon : float, lat : float) -> str:
+    # TODO
+    # Codelist: https://codes.wmo.int/wmdr/_ClimateZone
+    return None
+
+
+def snihToWmdr(estacion : EstacionSNIH, asociaciones : List[AsociacionMedicion]) -> WIGOSMetadataRecord:
+    ## 1 Observed variable
+    #     **1-01 Observed variable - measurand (M)**| CodigoMedicion->Descripcion | https://codes.wmo.int/wmdr/_ObservedVariableTerrestrial https://codes.wmo.int/wmdr/_ObservedVariableAtmosphere
+
+    # 1-02 Measurement unit (O) | CodigoMedicion->Unidad | https://codes.wmo.int/wmdr/_unit
+    # **1-03 Temporal extent (M)** | Asociacion->Desde, Asociacion->Hasta
+    # **1-04 Spatial extent (M)** | EstacionSNIH->Longitud, EstacionSNIH->Latitud, EstacionSNIH->Cota
+    # 1-05 Representativeness (O) | aplica? | https://codes.wmo.int/wmdr/_Representativeness
+
+    observing_facility : WMDRObservingFacility = {
+        "wmoRegion": "southAmerica",
+        "territory": "ARG",
+        "name": estacion["Descripcion"],
+        "FacilityType": "landFixed",
+        "identifier": str(estacion["Codigo"]),
+        "geospatialLocation": {
+            "geoLocation": {
+                "Point": "-%f -%f %f" % (estacion["Longitud"], estacion["Latitud"], estacion["Cota"]) if estacion["Cota"] is not None else "-%f -%f" % (estacion["Longitud"], estacion["Latitud"])
+            },
+            "coordinateReferenceSystem": "EPSG:4326"
+        },
+        "communicationMethod": "unknown",
+        "operatingStatus": "operational" if estacion["Habilitada"] else "nonReporting",
+        "description": "Modo de llegar: %s. Distancia a desembocadura: %s" % (estacion["ModoDeLlegar"] if estacion["ModoDeLlegar"] is not None else "desconocido", estacion["DistanciaDesembocadura"] if estacion["DistanciaDesembocadura"] is not None else "desconocido"),
+        "climateZone": getClimateZone(estacion["Longitud"], estacion["Latitud"]),
+        "facilitySet": "SNIH - ARG"
+    }
+    wmdr_record : WIGOSMetadataRecord = {
+        "facility": [observing_facility],
+        "facilitySet": "SNIH -ARG"
+    }
+    return wmdr_record 
+
+
+    ## 3. Station/platform
+    # 3-01 Region of origin of data (C) | southAmerica 	South America | https://codes.wmo.int/wmdr/_WMORegion
+    # 3-02 Territory of origin of data (C) | ARG 	Argentina | https://codes.wmo.int/wmdr/_TerritoryName
+    # **3-03 Station/platform name (M)** | EstacionSNIH->Descripcion | 
+    # **3-04 Station/platform type (M)** | landFixed 	Land (fixed) | https://codes.wmo.int/wmdr/_FacilityType
+    # **3-06 Station/platform unique identifier (M)** | EstacionSNIH->Codigo |
+    # **3-07 Geospatial location (M)** | EstacionSNIH->Longitud, EstacionSNIH->Latitud EstacionSNIH->Cota |
+    # 3-08 Data communication method (O) | EstacionSNIH->Transmision | https://codes.wmo.int/wmdr/_DataCommunicationMethod
+    # **3-09 Station operating status (M)** | EstacionSNIH->Habilitada | https://codes.wmo.int/wmdr/_ReportingStatus
+    # 3-10 Station/platform cluster (O) | aplica? | SNIH - AR
+
+    # 4-05 Site information (O) | EstacionSNIH->DistanciaDesembocadura EstacionSNIH->ModoDeLlegar |
+    # 4-07 Climate zone (O) | Derivar de coordenadas? | https://codes.wmo.int/wmdr/_ClimateZone
+
+def getWMDR(codigo_estacion : int, estaciones : Union[List[EstacionSNIH],None] = None, codigos_medicion : Union[List[CodigoMedicion],None] = None, asociaciones : Union[List[Asociacion],None] = None):
+    estaciones = estaciones if estaciones is not None else leerEstaciones()
+    codigos_medicion = codigos_medicion if codigos_medicion is not None else leerCodigosMedicion()
+    asociaciones = asociaciones if asociaciones is not None else leerListaAsociaciones()
+    df_estaciones = pandas.DataFrame(estaciones)
+    df_codigos_medicion = pandas.DataFrame(codigos_medicion)
+    df_asociaciones = pandas.DataFrame(asociaciones)
+    estacion = df_estaciones[df_estaciones["Codigo"] == codigo_estacion]
+    if not len(estacion):
+        raise ValueError("'Codigo' = %i not found in sites list" % codigo_estacion)
+    estacion = estacion.iloc[0].to_dict()
+    asoc_of_estacion = df_asociaciones[df_asociaciones["Estacion"] == codigo_estacion]
+    if not len(asoc_of_estacion):
+        logging.warning("No asociaciones found for 'Estacion' = %i" % codigo_estacion)
+    asoc_merge = asoc_of_estacion.merge(df_codigos_medicion, on="Codigo")
+    if len(asoc_of_estacion) > len(asoc_merge):
+        logging.warning("At least one variable code 'Codigo' of Asociaciones not found in CodigosMedicion: %i > %i " % (len(asoc_of_estacion), len(asoc_merge)))
+    return snihToWmdr(estacion, asoc_of_estacion.to_dict())
+
+##### cli #####
 
 def parse_datetime(s):
     for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
